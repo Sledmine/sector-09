@@ -1,0 +1,8 @@
+version: 1
+tag_space: 64M
+extend_limits: false
+scenarios:
+  - rzs_halo/levels/sector09/sector09
+commands:
+  release:
+    - mercury build --release --output package/game-maps/
