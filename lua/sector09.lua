@@ -8,23 +8,23 @@ local hard = "hard"
 local impossible = "impossible"
 local blam = require "blam"
 local engine = Engine
+local balltze = Balltze
 local hscExecuteScript = engine.hsc.executeScript
 local playSound = engine.userInterface.playSound
 local findTag = blam.findTag
 local tagClasses = blam.tagClasses
-local list = require "ui.list"
-local component = require "ui.component"
+
+local CustomPlayerLoadouts = {}
 
 local successSoundTagEntry = findTag("forward", tagClasses.sound)
-assert(successSoundTagEntry, "Failed to find success sound tag \"forward\"")
 local loadoutMenuWidgetTagEntry = findTag("sector_09_loadout", tagClasses.uiWidgetDefinition)
-assert(loadoutMenuWidgetTagEntry, "Failed to find loadout menu widget tag \"sector09_loadout\"")
 
 -- Wrapper function for opening a widget, plays sound and does internal logic
 ---@param widgetDefinitionHandle integer|string|EngineTagHandle @The handle or path of the widget definition
 ---@param pushHistory? boolean @If the widget should be pushed to the history; false by default
 ---@return MetaEngineWidget|nil @Created widget; nil if failed
 local function openWidget(widgetDefinitionHandle, pushHistory)
+    assert(successSoundTagEntry, "Failed to find success sound tag \"forward\"")
     playSound(successSoundTagEntry.id)
     return engine.userInterface.openWidget(widgetDefinitionHandle, pushHistory)
 end
@@ -37,7 +37,7 @@ local player_location = -1
 local location_update = false
 local alive = false
 local intro = true
-local firefight = false
+local isFirefightActive = false
 local wave = 1
 local music = 0
 local wave_total = 1
@@ -72,20 +72,140 @@ local visr_edge = true
 local loadout = 0
 local loadout_confirm = false
 
-local loadoutMenu = component.new(loadoutMenuWidgetTagEntry.id)
-local loadoutElements = list.new(loadoutMenu:findChildWidgetTag("options").id)
-loadoutElements:scrollable(false)
-loadoutElements:onSelect(function(item)
-    loadout = item.value
-    loadout_confirm = true
+local function getPlayerUnit(playerIndex)
+    return hsc.unit(hsc.list_get(hsc.players(), playerIndex))
+end
+
+local function getPlayerCount()
+    return hsc.list_count(hsc.players())
+end
+
+local function isPlayerInsideVolume(volumeName)
+    for i = 0, getPlayerCount() - 1 do
+        if hsc.volume_test_objects(volumeName, getPlayerUnit(i)) then
+            return true
+        end
+    end
+    return false
+end
+
+local function teleportPlayersTo(flag)
+    local result
+    for i = 1, getPlayerCount() do
+        result = hsc.object_teleport(getPlayerUnit(i - 1), flag)
+    end
+    return result
+end
+
+if not blam.isGameSAPP() then
+    local list = require "ui.list"
+    local component = require "ui.component"
+    assert(loadoutMenuWidgetTagEntry, "Failed to find loadout menu widget tag \"sector09_loadout\"")
+    local loadoutMenu = component.new(loadoutMenuWidgetTagEntry.id)
+    local loadoutElements = list.new(loadoutMenu:findChildWidgetTag("options").id)
+    loadoutElements:scrollable(false)
+    loadoutElements:onSelect(function(item)
+        logger:info("Selected loadout " .. tostring(item.value))
+        blam.rcon.dispatch("Loadout", tostring(item.value))
+        engine.userInterface.closeWidget()
+    end)
+    local values = {1, 2, 3, 4, 5}
+    loadoutElements:setItems(table.map(values, function(v)
+        return {value = v}
+    end))
+end
+
+local loadouts = {
+    {
+        primary = [[cmt\weapons\evolved\human\battle_rifle\battle_rifle]],
+        secondary = [[cmt\weapons\evolved\human\smg\smg]]
+    },
+    {
+        primary = [[zteam\objects\weapons\single\smg\h3o\smg]],
+        secondary = [[zteam\objects\weapons\single\magnum\h3o\magnum]]
+    },
+    {
+        primary = [[cmt\weapons\evolved_h1-spirit\assault_rifle\assault_rifle]],
+        secondary = [[cmt\weapons\evolved_h1-spirit\pistol\pistol]]
+    },
+    {
+        primary = [[cmt\weapons\evolved_h1-spirit\shotgun\shotgun]],
+        secondary = [[cmt\weapons\evolved_h1-spirit\assault_rifle\assault_rifle]]
+    },
+    {
+        primary = [[cmt\weapons\evolved\human\dmr\dmr]],
+        secondary = [[zteam\objects\weapons\single\smg\h3o\smg]]
+    }
+}
+
+blam.rcon.event("LoadoutMenu", function()
+    if not blam.isGameSAPP() then
+        logger:info("Opening loadout menu")
+        assert(loadoutMenuWidgetTagEntry,
+               "Failed to find loadout menu widget tag \"sector09_loadout\"")
+        openWidget(loadoutMenuWidgetTagEntry.id, false)
+    end
 end)
-loadoutElements:setItems({
-    {value = 1},
-    {value = 2},
-    {value = 3},
-    {value = 4},
-    {value = 5}
-})
+
+local function addPlayerWeapon(weaponTagPath, playerIndex)
+    local player = Engine.gameState.getPlayer(playerIndex)
+    if player then
+        local weaponTag = blam.findTag(weaponTagPath, blam.tagClasses.weapon)
+        assert(weaponTag, "Could not find weapon tag: " .. tostring(weaponTagPath))
+        local weaponHandle = Engine.gameState.createObject(weaponTag.id, nil, {
+            x = player.position.x,
+            y = player.position.y,
+            z = player.position.z + 0.15
+        })
+        assign_weapon(weaponHandle.value, playerIndex)
+    end
+end
+
+local function addPlayerLoadout(playerIndex)
+    local loadoutIndex = CustomPlayerLoadouts[playerIndex]
+    if loadoutIndex then
+        local loadoutData = loadouts[loadoutIndex]
+        addPlayerWeapon(loadoutData.secondary, playerIndex)
+        addPlayerWeapon(loadoutData.primary, playerIndex)
+    else
+        logger:warning("No loadout data found for player " .. tostring(playerIndex))
+    end
+end
+
+blam.rcon.event("Loadout", function(message, playerIndex)
+    logger:debug("Received loadout command: " .. tostring(message) .. " from player " ..
+                     tostring(playerIndex))
+    if blam.isGameHost() or blam.isGameSinglePlayer() then
+        local desiredLoadout = tointeger(message)
+        if desiredLoadout and desiredLoadout >= 1 and desiredLoadout <= #loadouts then
+            logger:debug("Setting loadout to " .. tostring(desiredLoadout))
+            loadout = desiredLoadout
+            loadout_confirm = true
+        end
+    elseif blam.isGameSAPP() then
+        logger:debug("Processing loadout for player " .. tostring(playerIndex))
+        local loadoutIndex = tointeger(message)
+
+        -- Clients picked a loadout, store it and respawn them
+        CustomPlayerLoadouts[playerIndex] = loadoutIndex
+
+        -- Delete the player's weapons
+        execute_script("wdel " .. playerIndex .. " 5")
+
+        local player = Engine.gameState.getPlayer(playerIndex)
+        if player then
+            logger:debug(
+                "Spawning weapons for player " .. tostring(playerIndex) .. " with loadout " ..
+                    tostring(loadoutIndex))
+            addPlayerLoadout(playerIndex)
+        end
+
+        if not isFirefightActive then
+            loadout = loadoutIndex
+            loadout_confirm = true
+        end
+    end
+end)
 
 function sector09.player0(call, sleep)
     return hsc.unit(hsc.list_get(hsc.players(), 0))
@@ -100,7 +220,7 @@ function sector09.firefight_debugging(call, sleep)
     hsc.game_speed(1)
     sleep(30)
     sleep(120)
-    hsc.inspect(firefight)
+    hsc.inspect(isFirefightActive)
     hsc.inspect(wave)
     hsc.inspect(music)
     hsc.inspect(wave_total)
@@ -139,12 +259,6 @@ function sector09.firefight_debugging(call, sleep)
 end
 script.continuous(sector09.firefight_debugging)
 
-function sector09.cheats(call, sleep)
-    --hsc.cheat_deathless_player(true)
-    hscExecuteScript("cheat_deathless_player true")
-end
-script.startup(sector09.cheats)
-
 function sector09.cleanup(call, sleep)
     sleep(2400)
     hsc.rasterizer_decals_flush()
@@ -153,8 +267,10 @@ end
 script.continuous(sector09.cleanup)
 
 function sector09.waveprinter(call, sleep)
-    hsc.cls()
-    hsc.inspect(wave_total)
+    if blam.isGameHost() or blam.isGameSinglePlayer() then
+        hsc.cls()
+        hsc.inspect(wave_total)
+    end
 end
 script.continuous(sector09.waveprinter)
 
@@ -205,7 +321,9 @@ function sector09.lives_display(call, sleep)
         hsc.cinematic_set_title("12lives")
     end
 end
-script.continuous(sector09.lives_display)
+if not blam.isGameSAPP() then
+    script.continuous(sector09.lives_display)
+end
 
 function sector09.visr_on(call, sleep)
     hsc.sound_impulse_start("rzs_halo\\s9\\assets\\sounds\\sfx\\visr-on\\visr-on", "none", 1)
@@ -283,72 +401,30 @@ function sector09.loadout(call, sleep)
     sleep(function()
         return loadout_mode == true
     end)
-    openWidget(loadoutMenuWidgetTagEntry.id, false)
+    sleep(45)
+    blam.rcon.dispatch("LoadoutMenu")
     loadout_mode = false
 end
-script.continuous(sector09.loadout)
-
-function sector09.loadout_a(call, sleep)
-    loadout = 1
-    loadout_confirm = true
-end
-
-function sector09.loadout_b(call, sleep)
-    loadout = 2
-    loadout_confirm = true
-end
-
-function sector09.loadout_c(call, sleep)
-    loadout = 3
-    loadout_confirm = true
-end
-
-function sector09.loadout_d(call, sleep)
-    loadout = 4
-    loadout_confirm = true
-end
-
-function sector09.loadout_e(call, sleep)
-    loadout = 5
-    loadout_confirm = true
+if not blam.isGameSAPP() then
+    script.continuous(sector09.loadout)
 end
 
 function sector09.loadout_spawn(call, sleep)
     sleep(function()
-        return loadout_confirm == true and loadout ~= 0
+        return loadout_confirm and loadout ~= 0
     end)
     hsc.fade_out(0, 0, 0, 0)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "empty", true)
-    sleep(3)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "balls", true)
-    sleep(3)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "empty", true)
-    sleep(3)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "empty", true)
-    sleep(3)
-    if loadout == 1 then
-        hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "loadout_a", true)
-    end
-    if loadout == 2 then
-        hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "loadout_b", true)
-    end
-    if loadout == 3 then
-        hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "loadout_c", true)
-    end
-    if loadout == 4 then
-        hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "loadout_d", true)
-    end
-    if loadout == 5 then
-        hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "loadout_e", true)
+    -- Local loadout functionality
+    if blam.isGameHost() or blam.isGameSinglePlayer() then
+        call(sector09.reset)
+        local chars = "abcde"
+        local player = getPlayerUnit(0)
+        hsc.player_add_equipment(player, "loadout_" .. chars:sub(loadout, loadout), true)
     end
     hsc.player_enable_input(true)
-    hsc.cinematic_set_title("fire")
-    sleep(function()
-        return hsc.player_action_test_primary_trigger()
-    end)
     hsc.show_hud_help_text(false)
     sleep(90)
-    hsc.object_teleport(hsc.unit(hsc.list_get(hsc.players(), 0)), "starting_point")
+    teleportPlayersTo("starting_point")
     hsc.camera_control(false)
     hsc.fade_in(0, 0, 0, 30)
     hsc.cinematic_show_letterbox(false)
@@ -370,8 +446,7 @@ function sector09.loadout_spawn(call, sleep)
     end
     loadout_confirm = false
     loadout_mode = false
-    firefight = true
-    debugging = true
+    isFirefightActive = true
     alive = true
     hsc.camera_set("loadout_cam", 0)
     camera_mode = false
@@ -382,7 +457,7 @@ function sector09.hunt(call, sleep)
     sleep(function()
         return player_tracking == true
     end)
-    if hsc.volume_test_objects("base_left", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("base_left") then
         hsc.begin({
             function()
                 player_location = 1
@@ -474,12 +549,12 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("base_left", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("base_left")
                 end)
             end
         })
     end
-    if hsc.volume_test_objects("base_right", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("base_right") then
         hsc.begin({
             function()
                 player_location = 2
@@ -571,12 +646,12 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("base_right", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("base_right")
                 end)
             end
         })
     end
-    if hsc.volume_test_objects("base_upper_deck", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("base_upper_deck") then
         hsc.begin({
             function()
                 player_location = 3
@@ -668,12 +743,12 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("base_upper_deck", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("base_upper_deck")
                 end)
             end
         })
     end
-    if hsc.volume_test_objects("ammo_room", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("ammo_room") then
         hsc.begin({
             function()
                 player_location = 0
@@ -765,12 +840,12 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("ammo_room", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("ammo_room")
                 end)
             end
         })
     end
-    if hsc.volume_test_objects("streets_left", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("streets_left") then
         hsc.begin({
             function()
                 player_location = 4
@@ -862,12 +937,12 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("streets_left", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("streets_left")
                 end)
             end
         })
     end
-    if hsc.volume_test_objects("streets_right", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("streets_right") then
         hsc.begin({
             function()
                 player_location = 5
@@ -959,12 +1034,12 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("streets_right", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("streets_right")
                 end)
             end
         })
     end
-    if hsc.volume_test_objects("deathpit", call(sector09.player0)) == true then
+    if isPlayerInsideVolume("deathpit") then
         hsc.begin({
             function()
                 player_location = 6
@@ -1056,18 +1131,15 @@ function sector09.hunt(call, sleep)
             end,
             function()
                 return sleep(function()
-                    return hsc.volume_test_objects("deathpit", call(sector09.player0)) ~= 1
+                    return not isPlayerInsideVolume("deathpit")
                 end)
             end
         })
     end
-    if not (hsc.volume_test_objects("deathpit", call(sector09.player0)) == true and
-        hsc.volume_test_objects("streets_right", call(sector09.player0)) == true and
-        hsc.volume_test_objects("streets_left", call(sector09.player0)) == true and
-        hsc.volume_test_objects("ammo_room", call(sector09.player0)) == true and
-        hsc.volume_test_objects("base_upper_deck", call(sector09.player0)) == true and
-        hsc.volume_test_objects("base_left", call(sector09.player0)) == true and
-        hsc.volume_test_objects("base_right", call(sector09.player0)) == true) then
+    if not (isPlayerInsideVolume("deathpit") and isPlayerInsideVolume("streets_right") and
+        isPlayerInsideVolume("streets_left") and isPlayerInsideVolume("ammo_room") and
+        isPlayerInsideVolume("base_upper_deck") and isPlayerInsideVolume("base_left") and
+        isPlayerInsideVolume("base_right")) then
         hsc.begin({
             function()
                 if hsc.ai_living_count("elite_squad_a") > 0 then
@@ -1160,25 +1232,27 @@ end
 script.continuous(sector09.hunt)
 
 function sector09.reset(call, sleep)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "empty", true)
-    sleep(3)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "balls", true)
-    sleep(3)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "empty", true)
-    sleep(3)
-    hsc.player_add_equipment(hsc.unit(hsc.list_get(hsc.players(), 0)), "empty", true)
-    sleep(3)
+    if blam.isGameHost() or blam.isGameSinglePlayer() then
+        local player = getPlayerUnit(0)
+        hsc.player_add_equipment(player, "empty", true)
+        sleep(3)
+        hsc.player_add_equipment(player, "balls", true)
+        sleep(3)
+        hsc.player_add_equipment(player, "empty", true)
+        sleep(3)
+        hsc.player_add_equipment(player, "empty", true)
+        sleep(3)
+    end
 end
 
 function sector09.camera(call, sleep)
     call(sector09.reset)
-    debugging = true
     hsc.fade_out(0, 0, 0, 0)
     hsc.garbage_collect_now()
     hsc.rasterizer_decals_flush()
     hsc.camera_control(true)
     hsc.player_enable_input(false)
-    hsc.object_teleport(hsc.unit(hsc.list_get(hsc.players(), 0)), "teleport")
+    teleportPlayersTo("teleport")
     hsc.cinematic_show_letterbox(true)
     sleep(30)
     hsc.fade_out(0, 0, 0, 0)
@@ -1195,7 +1269,11 @@ end
 
 function sector09.define(call, sleep)
     call(sector09.camera)
-    debugging = true
+    if blam.isGameSAPP() then
+        blam.rcon.dispatch("LoadoutMenu")
+    end
+    hsc.ai_erase_all()
+    hsc.ai(true)
 end
 script.startup(sector09.define)
 
@@ -1237,7 +1315,9 @@ function sector09.never_die(call, sleep)
     end)
     hscExecuteScript("cheat_deathless_player true")
 end
-script.continuous(sector09.never_die)
+if blam.isGameHost() or blam.isGameSinglePlayer() then
+    script.continuous(sector09.never_die)
+end
 
 function sector09.loadout_camera(call, sleep)
     sleep(function()
@@ -1271,15 +1351,7 @@ function sector09.loadout_camera(call, sleep)
 end
 script.continuous(sector09.loadout_camera)
 
-function sector09.die_motherfucker(call, sleep)
-    sleep(function()
-        return hsc.unit_get_health(hsc.unit(hsc.list_get(hsc.players(), 0))) == 0.000000
-    end)
-    alive = false
-    hsc.unit_set_desired_flashlight_state(call(sector09.player0), false)
-    firefight = false
-    lives_count = lives_count - 1.000000
-
+function sector09.game_over(call, sleep)
     if lives_count <= -1 then
         hsc.begin({
             function()
@@ -1308,7 +1380,7 @@ function sector09.die_motherfucker(call, sleep)
                 return sleep(30)
             end,
             function()
-                return hsc.object_teleport(hsc.unit(hsc.list_get(hsc.players(), 0)), "end_point")
+                return teleportPlayersTo("end_point")
             end,
             function()
                 return hsc.camera_control(true)
@@ -1375,10 +1447,26 @@ function sector09.die_motherfucker(call, sleep)
                 return sleep(9000)
             end,
             function()
-                return hsc.game_revert()
+                if not blam.isGameSAPP() then
+                    return hsc.game_revert()
+                else
+                    hsc.sv_map_next()
+                end
+                return true
             end
         })
     end
+end
+
+function sector09.die_motherfucker(call, sleep)
+    sleep(function()
+        return hsc.unit_get_health(hsc.unit(hsc.list_get(hsc.players(), 0))) == 0
+    end)
+    alive = false
+    isFirefightActive = false
+    lives_count = lives_count - 1
+
+    call(sector09.game_over)
     sleep(30)
     if lives_count >= 0 then
         hsc.begin({
@@ -1392,13 +1480,15 @@ function sector09.die_motherfucker(call, sleep)
                 return sleep(30)
             end,
             function()
-                return hsc.object_teleport(hsc.unit(hsc.list_get(hsc.players(), 0)), "teleport")
+                return teleportPlayersTo("teleport")
             end,
             function()
                 return hsc.ai(false)
             end,
             function()
-                loadout_mode = true
+                if blam.isGameHost() or blam.isGameSinglePlayer() then
+                    loadout_mode = true
+                end
             end,
             function()
                 return call(sector09.camera)
@@ -1406,41 +1496,45 @@ function sector09.die_motherfucker(call, sleep)
         })
     end
 end
-script.continuous(sector09.die_motherfucker)
+if blam.isGameHost() or blam.isGameSinglePlayer() then
+    script.continuous(sector09.die_motherfucker)
+end
 
 function sector09.dont_drop_the_soap(call, sleep)
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("grunt_patrol"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("jackal_patrol"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_patrol_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_patrol_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("jackal_grunt_patrol"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_c"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_killsquad_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_killsquad_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_killsquad_c"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_pack_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_pack_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("mystic_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("mystic_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("wraith"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("ghosts"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_c"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_support"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_patrol_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_patrol_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_squad_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_squad_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_killsquad_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_killsquad_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_killsquad_c"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_pack_a"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_pack_b"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("banshee"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_sniper"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("inv_elites"))
-    hsc.unit_doesnt_drop_items(hsc.ai_actors("test"))
+    if not blam.isGameSAPP() then
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("grunt_patrol"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("jackal_patrol"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_patrol_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_patrol_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("jackal_grunt_patrol"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_c"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_killsquad_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_killsquad_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_killsquad_c"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_pack_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_pack_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("mystic_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("mystic_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("wraith"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("ghosts"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_squad_c"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("elite_support"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_patrol_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_patrol_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_squad_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_squad_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_killsquad_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_killsquad_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_killsquad_c"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_pack_a"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_pack_b"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("banshee"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("brute_sniper"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("inv_elites"))
+        hsc.unit_doesnt_drop_items(hsc.ai_actors("test"))
+    end
 end
 
 function sector09.spawn_waves(call, sleep)
@@ -2898,7 +2992,7 @@ function sector09.firefight_repeat(call, sleep)
         return block == false
     end)
     sleep(function()
-        return firefight == true
+        return isFirefightActive == true
     end)
     if intro == true then
         hsc.begin({
@@ -2964,7 +3058,7 @@ function sector09.firefight_repeat(call, sleep)
                 intro = false
             end,
             function()
-                firefight = true
+                isFirefightActive = true
             end,
             function()
                 return hsc.sound_looping_stop(
@@ -3391,5 +3485,32 @@ function sector09.elite_support(call, sleep)
     end)
 end
 script.continuous(sector09.elite_support)
+
+if blam.isGameSAPP() then
+    script.continuous(function(call, sleep)
+        sleep(function()
+            return lives_count <= 0
+        end)
+        call(sector09.game_over)
+    end)
+    local originalOnPlayerDead = OnPlayerDead
+    OnPlayerDead = function(playerIndex)
+        if originalOnPlayerDead then
+            originalOnPlayerDead(playerIndex)
+        end
+        lives_count = lives_count - 1
+        say_all("Lives remaining: " .. tostring(lives_count))
+
+        blam.rcon.dispatch("LoadoutMenu", playerIndex)
+    end
+
+    local originalOnPlayerSpawn = OnPlayerSpawn
+    OnPlayerSpawn = function(playerIndex)
+        if originalOnPlayerSpawn then
+            originalOnPlayerSpawn(playerIndex)
+        end
+        addPlayerLoadout(playerIndex)
+    end
+end
 
 return sector09
